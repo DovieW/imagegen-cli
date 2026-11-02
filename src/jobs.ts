@@ -100,6 +100,10 @@ export class Engine extends EventEmitter {
       if (signal.aborted) throw signal.reason;
       if (!job.remote && !job.results?.length) {
         for (let retry = 0; ; retry++) {
+          if (this.paused || job.status === "paused") {
+            job.status = "paused";
+            return;
+          }
           job.status = "submitting";
           job.attempts++;
           job.error = undefined;

@@ -238,17 +238,30 @@ export async function runCli(args: string[], library: Library) {
       if (command === "cancel")
         await engine.cancel(library.findJob(pos[0] || "").job.id);
       else {
+        let watched: string[] = [];
         if (spec) {
           const { dir, batch } = library.create(spec);
+          watched = batch.jobs.map((j) => j.id);
           engine.add(dir, batch);
-        } else
-          engine.resume(
-            pos[0] ? library.findJob(pos[0]).job.id : undefined,
-            !!get("retry"),
-          );
+        } else {
+          const id = pos[0] ? library.findJob(pos[0]).job.id : undefined;
+          const before = new Set(engine.entries.keys());
+          watched = id
+            ? [id]
+            : [...engine.entries.values()]
+                .filter((e) => e.job.status === "paused")
+                .map((e) => e.job.id);
+          engine.resume(id, !!get("retry"));
+          if (get("retry"))
+            watched = [...engine.entries.keys()].filter(
+              (id) => !before.has(id),
+            );
+        }
         await engine.idle();
-        for (const e of engine.entries.values())
-          if (["failed", "uncertain"].includes(e.job.status))
+        for (const id of watched)
+          if (
+            ["failed", "uncertain"].includes(engine.entries.get(id)!.job.status)
+          )
             process.exitCode = 1;
       }
     } finally {
