@@ -18,6 +18,7 @@ import {
 } from "./config";
 import { MODELS, modelFor, validateRow } from "./models";
 import { Engine } from "./jobs";
+import { serveEngine } from "./control";
 import { expandBatch, Library } from "./storage";
 import { preview, openExternal } from "./viewer";
 import { pathSuggestions } from "./paths";
@@ -1419,6 +1420,7 @@ export async function runTui(library: Library) {
   const engine = new Engine(library);
   const App = createApp(library, engine);
   try {
+    await serveEngine(engine);
     await new Promise<void>((resolve, reject) => {
       void render(() => <App />, {
         exitOnCtrlC: false,

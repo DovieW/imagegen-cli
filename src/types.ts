@@ -70,6 +70,8 @@ export interface Job {
   requestId?: string;
 }
 export interface Batch {
+  requestKey?: string;
+  specHash?: string;
   schemaVersion: 1;
   id: string;
   name: string;

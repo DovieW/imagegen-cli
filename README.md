@@ -67,7 +67,21 @@ Jobs run inside the app. **Ctrl-C** pauses new submissions while current request
 
 The engine saves state before submission, immediately after a receipt/result arrives, and after each output. Known asynchronous requests resume by polling their saved receipt. Persisted image results resume by downloading. Expired signed URLs are refreshed by polling the existing receipt. A network failure or server error during submission is **uncertain**, not automatically retried. Check the provider's history before explicitly retrying; a new submission can mean a second charge. Explicit retries create a new job and retain the original job and images. Explicit HTTP 429 rejections are retried up to three times with backoff. Polling tolerates transient failures. Cancellation is best-effort (remote cancellation is available for fal); cancelling synchronously submitted work only interrupts local handling.
 
-Only one process may own the job engine for a given image root. Read-only CLI listing can coexist with the workbench. Run job-control commands from its UI when it is open. Avoid changing tags or exporting into the library from another application instance while the workbench is editing the same metadata.
+Only one process owns the job engine per image root. Other CLI processes can submit, monitor, cancel, and annotate work through its private local socket while the TUI or a foreground generation runs. `--no-wait` requires an existing owner; there is no background daemon. The owner’s credentials and concurrency settings apply.
+
+## Agent CLI
+
+The CLI has a versioned JSON contract, structured errors and exit codes, JSONL progress, stdin inputs, request-key deduplication, discoverable schemas, paginated search, and complete job/output IDs and paths. Agents can work alongside the TUI without starting another engine. See [the agent guide](docs/agents.md) for the full contract, lifecycle limits, and examples.
+
+```sh
+imagegen schema --json
+imagegen models --json
+imagegen generate --prompt-file prompt.txt --request-key cover-v1 --json
+imagegen generate --from IMAGE_ID --prompt 'Make the light warmer' --request-key cover-v2 --json
+imagegen jobs --json
+```
+
+Version 0.2 changes `--json` output to a common `{schemaVersion,ok,command,data,error?}` envelope; agent scripts should read `.data` rather than expecting raw arrays. Generation returns results on completion instead of only printing the input configuration.
 
 ## CLI and batch files
 

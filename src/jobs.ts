@@ -21,6 +21,7 @@ export class Engine extends EventEmitter {
   entries = new Map<string, { dir: string; batch: Batch; job: Job }>();
   active = new Map<string, AbortController>();
   paused = false;
+  closing = false;
   private tasks = new Set<Promise<void>>();
   private release: () => void;
   constructor(
@@ -290,6 +291,10 @@ export class Engine extends EventEmitter {
     }
   }
   async close(interrupt = true) {
+    if (!this.closing) {
+      this.closing = true;
+      this.emit("closing");
+    }
     this.pause();
     if (interrupt) for (const c of this.active.values()) c.abort();
     await Promise.all([...this.tasks]);

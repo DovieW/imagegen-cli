@@ -141,6 +141,27 @@ export function modelFor(id: string, provider?: Provider): Model {
 export function validateRow(row: BatchRow): Model {
   if (!row || typeof row.prompt !== "string" || !row.prompt.trim())
     throw new Error("Each row needs a prompt");
+  for (const key of Object.keys(row))
+    if (
+      ![
+        "prompt",
+        "model",
+        "provider",
+        "references",
+        "parentIds",
+        "settings",
+        "count",
+      ].includes(key)
+    )
+      throw new Error(`Unknown row property: ${key}`);
+  if (typeof row.model !== "string") throw new Error("Model must be a string");
+  if (
+    row.settings !== undefined &&
+    (!row.settings ||
+      typeof row.settings !== "object" ||
+      Array.isArray(row.settings))
+  )
+    throw new Error("Settings must be an object");
   const m = modelFor(row.model, row.provider);
   if (
     !Number.isInteger(row.count ?? 1) ||

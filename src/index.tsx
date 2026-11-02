@@ -1,17 +1,10 @@
 #!/usr/bin/env bun
-import { HELP, runCli } from "./cli";
+import { runCli } from "./cli";
 import { Library } from "./storage";
 import { runTui } from "./tui";
+import { envelope, errorInfo } from "./errors";
 process.umask(0o077);
 const args = process.argv.slice(2);
-if (["--help", "-h", "help"].includes(args[0] || "")) {
-  console.log(HELP);
-  process.exit(0);
-}
-if (["--version", "version"].includes(args[0] || "")) {
-  console.log("imagegen 0.1.0");
-  process.exit(0);
-}
 let library: Library | undefined;
 try {
   library = new Library();
@@ -24,8 +17,16 @@ try {
     await runTui(library);
   } else await runCli(args, library);
 } catch (e) {
-  console.error(`imagegen: ${(e as Error).message}`);
-  process.exitCode = 1;
+  const error = errorInfo(e);
+  if (args.includes("--json") || args.includes("--jsonl"))
+    console.log(
+      JSON.stringify({
+        ...(args.includes("--jsonl") ? { event: "result" } : {}),
+        ...envelope(args[0] || "tui", undefined, error),
+      }),
+    );
+  else console.error(`imagegen: ${error.code}: ${error.message}`);
+  process.exitCode = error.exitCode;
 } finally {
   library?.close();
 }

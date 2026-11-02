@@ -23,6 +23,7 @@ import {
 } from "node:path";
 import { atomicJson, expand, imageRoot, stateRoot } from "./config";
 import { validateRow } from "./models";
+import { CliError } from "./errors";
 import type {
   Batch,
   BatchRow,
@@ -55,12 +56,28 @@ export function imageMime(data: Uint8Array): string {
 }
 export function expandBatch(spec: BatchSpec): BatchRow[] {
   if (
+    !spec ||
     spec.schemaVersion !== 1 ||
     !Array.isArray(spec.rows) ||
     typeof spec.name !== "string" ||
     !spec.name.trim()
   )
     throw new Error("Expected schemaVersion 1, name, and rows array");
+  for (const key of Object.keys(spec))
+    if (!["schemaVersion", "name", "rows", "matrix"].includes(key))
+      throw new Error(`Unknown batch property: ${key}`);
+  if (spec.matrix) {
+    for (const key of Object.keys(spec.matrix))
+      if (
+        !["prompts", "models", "settings", "references", "count"].includes(key)
+      )
+        throw new Error(`Unknown matrix property: ${key}`);
+    if (
+      spec.matrix.settings !== undefined &&
+      (!Array.isArray(spec.matrix.settings) || !spec.matrix.settings.length)
+    )
+      throw new Error("Matrix settings must be a nonempty array");
+  }
   const rows = [...spec.rows];
   if (spec.matrix) {
     const m = spec.matrix;
@@ -159,6 +176,51 @@ export class Library {
     return result.sort((a, b) =>
       b.batch.createdAt.localeCompare(a.batch.createdAt),
     );
+  }
+  createIdempotent(spec: BatchSpec, requestKey: string) {
+    if (!requestKey || requestKey.length > 200)
+      throw new CliError(
+        "INVALID_REQUEST_KEY",
+        "Request key must contain 1–200 characters",
+      );
+    const rows = expandBatch(spec).map((row) => {
+      const m = validateRow(row);
+      return {
+        prompt: row.prompt.trim(),
+        model: m.id,
+        provider: m.provider,
+        count: row.count ?? 1,
+        settings: Object.fromEntries(
+          Object.entries(row.settings || {}).sort(([a], [b]) =>
+            a.localeCompare(b),
+          ),
+        ),
+        parentIds: row.parentIds || [],
+        references: (row.references || []).map((p) =>
+          hash(readFileSync(expand(p))),
+        ),
+      };
+    });
+    const specHash = hash(
+      Buffer.from(JSON.stringify({ name: spec.name, rows })),
+    );
+    const existing = this.batches().find(
+      (e) => e.batch.requestKey === requestKey,
+    );
+    if (existing) {
+      if (existing.batch.specHash !== specHash)
+        throw new CliError(
+          "REQUEST_KEY_CONFLICT",
+          "Request key already belongs to a different batch configuration",
+          7,
+        );
+      return { ...existing, reused: true };
+    }
+    const entry = this.create(spec);
+    entry.batch.requestKey = requestKey;
+    entry.batch.specHash = specHash;
+    this.save(entry.dir, entry.batch);
+    return { ...entry, reused: false };
   }
   create(spec: BatchSpec): { dir: string; batch: Batch } {
     const rows = expandBatch(spec),
@@ -334,6 +396,7 @@ export class Library {
       )
       .filter(
         (r) =>
+          resolve(r.path).startsWith(resolve(this.root) + sep) &&
           (!favorite || r.favorite) &&
           words.every((w) =>
             `${r.prompt} ${r.model} ${r.provider} ${r.batchName} ${r.createdAt} ${r.tags.join(" ")}`
