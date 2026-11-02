@@ -56,7 +56,11 @@ export class Providers implements Adapter {
           : Math.max(0, Date.parse(delay || "") - Date.now()) || 0,
       );
     }
-    return r.json();
+    const data = await r.json();
+    if (data && typeof data === "object")
+      data._requestId =
+        r.headers.get("x-request-id") || r.headers.get("request-id") || data.id;
+    return data;
   }
   async submit(
     job: Job,
@@ -203,7 +207,7 @@ export class Providers implements Adapter {
     return {
       results,
       usage: data.usage || data.usage_metadata,
-      requestId: data.id,
+      requestId: data.id || data._requestId,
     };
   }
   validateRemote(job: Job, r: Remote) {

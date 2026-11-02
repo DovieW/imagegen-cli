@@ -116,6 +116,7 @@ export class Engine extends EventEmitter {
             this.save(id);
             break;
           } catch (error) {
+            if (String(job.status) === "cancelled") throw error;
             // Only an explicit rejection is safe to resubmit automatically.
             if (
               error instanceof HttpError &&

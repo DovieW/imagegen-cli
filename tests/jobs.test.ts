@@ -248,3 +248,34 @@ test("explicit rate-limit rejection is safely retried and cancellation never res
     f.close();
   }
 });
+
+test("cancelling an in-flight synchronous submission retains cancelled status", async () => {
+  const f = fixture(),
+    entry = create(f);
+  let start!: () => void;
+  const started = new Promise<void>((r) => (start = r));
+  const e = new Engine(
+    f.library,
+    adapter({
+      submit: async (_j, _d, signal) => {
+        start();
+        await new Promise((_, reject) =>
+          signal.addEventListener("abort", () => reject(new Error("abort")), {
+            once: true,
+          }),
+        );
+        return { results: [] };
+      },
+    }),
+  );
+  try {
+    e.add(entry.dir, entry.batch);
+    await started;
+    await e.cancel(entry.batch.jobs[0]!.id);
+    await e.idle();
+    expect(entry.batch.jobs[0]!.status).toBe("cancelled");
+  } finally {
+    await e.close();
+    f.close();
+  }
+});
