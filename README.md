@@ -20,6 +20,12 @@ imagegen doctor
 
 The compiled executable needs no Node.js or Bun installation. `install.sh --local dist/imagegen` also installs a local build. For a published GitHub release, `install.sh` downloads the binary and verifies its SHA-256 checksum before installation. Release publication is separate from a local build.
 
+On dotfiles-managed workstations, use `dot imagegen install`, `dot imagegen update`,
+and `dot imagegen check`. The managed installer uses authenticated GitHub CLI
+access to this private repository and validates the published binary checksum.
+The shell profile supplies a first-use launcher; `dot update` and `dot doctor`
+also include imagegen. Sign in with `gh auth login` using an account with access.
+
 ## Image library
 
 Originals live under `~/imagegen/<date>-<batch-name>-<short-id>/`, alongside `batch.json`, per-image `.json` metadata, and an `inputs/` directory containing immutable reference snapshots. Prompts, exact model/provider IDs, effective settings, request IDs, available usage, hashes, tags, favorites, and edit lineage travel with these files. Images retain the provider's original bytes and format.

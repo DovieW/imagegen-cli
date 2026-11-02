@@ -1,7 +1,6 @@
 #!/usr/bin/env bun
 import { runCli } from "./cli";
 import { Library } from "./storage";
-import { runTui } from "./tui";
 import { envelope, errorInfo } from "./errors";
 process.umask(0o077);
 const args = process.argv.slice(2);
@@ -14,6 +13,7 @@ try {
         "Interactive workbench needs a terminal. Use imagegen --help",
       );
     library.rebuild();
+    const { runTui } = await import("./tui");
     await runTui(library);
   } else await runCli(args, library);
 } catch (e) {

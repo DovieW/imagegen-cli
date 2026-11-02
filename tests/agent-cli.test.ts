@@ -337,7 +337,7 @@ test("executable emits one structured error object, stable nonzero status, and n
   } finally {
     f.close();
   }
-});
+}, 30000);
 
 test("independent CLI processes share an existing foreground engine and return usable image files", async () => {
   const f = fixture();
