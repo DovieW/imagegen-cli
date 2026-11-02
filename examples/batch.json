@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "name": "Book cover exploration",
+  "rows": [
+    { "prompt": "A watercolor fox reading under a tree, book cover composition", "model": "gpt-image-2.5-flare", "count": 2, "settings": { "quality": "medium", "size": "1024x1536" } },
+    { "prompt": "A watercolor fox reading under a tree, book cover composition", "model": "gemini-nano-banana-2.1", "count": 2, "settings": { "aspect_ratio": "2:3" } }
+  ],
+  "matrix": {
+    "prompts": ["An ink illustration of a forest library", "A papercut illustration of a forest library"],
+    "models": ["gpt-image-2.5-sunburst", "gpt-image-2.5-flare"],
+    "settings": [{ "quality": "low" }, { "quality": "medium" }],
+    "count": 1
+  }
+}

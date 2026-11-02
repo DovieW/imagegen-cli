@@ -1,0 +1,390 @@
+import { Database } from "bun:sqlite";
+import { createHash, randomUUID } from "node:crypto";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  statSync,
+  writeFileSync,
+  constants,
+  unlinkSync,
+} from "node:fs";
+import {
+  basename,
+  dirname,
+  extname,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
+import { atomicJson, expand, imageRoot, stateRoot } from "./config";
+import { validateRow } from "./models";
+import type {
+  Batch,
+  BatchRow,
+  BatchSpec,
+  ImageEntry,
+  ImageRecord,
+  Job,
+  Output,
+} from "./types";
+export const hash = (b: Uint8Array) =>
+  createHash("sha256").update(b).digest("hex");
+export function inside(root: string, path: string): string {
+  const p = resolve(root, path);
+  const r = relative(resolve(root), p);
+  if (r === ".." || r.startsWith(".." + sep) || resolve(p) === resolve(root))
+    throw new Error("Invalid artifact path");
+  return p;
+}
+export function imageMime(data: Uint8Array): string {
+  const b = Buffer.from(data);
+  if (b.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])))
+    return "image/png";
+  if (b[0] === 255 && b[1] === 216 && b[2] === 255) return "image/jpeg";
+  if (
+    b.toString("ascii", 0, 4) === "RIFF" &&
+    b.toString("ascii", 8, 12) === "WEBP"
+  )
+    return "image/webp";
+  throw new Error("Expected a PNG, JPEG, or WebP image");
+}
+export function expandBatch(spec: BatchSpec): BatchRow[] {
+  if (
+    spec.schemaVersion !== 1 ||
+    !Array.isArray(spec.rows) ||
+    typeof spec.name !== "string" ||
+    !spec.name.trim()
+  )
+    throw new Error("Expected schemaVersion 1, name, and rows array");
+  const rows = [...spec.rows];
+  if (spec.matrix) {
+    const m = spec.matrix;
+    if (
+      !Array.isArray(m.prompts) ||
+      !Array.isArray(m.models) ||
+      !m.prompts.length ||
+      !m.models.length
+    )
+      throw new Error("Matrix needs prompts and models");
+    if (m.prompts.length * m.models.length * (m.settings?.length || 1) > 10000)
+      throw new Error("Batch exceeds 10,000 jobs");
+    for (const prompt of m.prompts)
+      for (const model of m.models)
+        for (const settings of m.settings || [{}])
+          rows.push({
+            prompt,
+            model,
+            settings,
+            references: m.references,
+            count: m.count,
+          });
+  }
+  let n = 0;
+  for (const row of rows) {
+    validateRow(row);
+    n += row.count ?? 1;
+  }
+  if (!n || n > 10000) throw new Error("Batch must contain 1–10,000 jobs");
+  return rows;
+}
+export class Library {
+  db: Database;
+  constructor(
+    readonly root = imageRoot(),
+    readonly state = stateRoot(),
+  ) {
+    mkdirSync(root, { recursive: true, mode: 0o700 });
+    mkdirSync(state, { recursive: true, mode: 0o700 });
+    this.db = new Database(join(state, "library.sqlite3"), { create: true });
+    this.db.run("PRAGMA journal_mode=WAL");
+    this.db.run("PRAGMA busy_timeout=5000");
+    this.db.run(
+      "CREATE TABLE IF NOT EXISTS images(id TEXT PRIMARY KEY, path TEXT NOT NULL UNIQUE, metadata_path TEXT NOT NULL, record TEXT NOT NULL)",
+    );
+  }
+  close() {
+    this.db.close();
+  }
+  acquire(): () => void {
+    const path = join(this.root, ".imagegen.lock");
+    try {
+      writeFileSync(path, String(process.pid), { flag: "wx", mode: 0o600 });
+    } catch {
+      let alive = true;
+      try {
+        const pid = Number(readFileSync(path, "utf8"));
+        if (!Number.isInteger(pid) || pid <= 0) throw new Error("Invalid lock");
+        process.kill(pid, 0);
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === "ESRCH") alive = false;
+      }
+      if (alive)
+        throw new Error(
+          "Another imagegen process owns the job engine. Use that workbench, or wait for it to exit.",
+        );
+      unlinkSync(path);
+      return this.acquire();
+    }
+    return () => {
+      if (
+        existsSync(path) &&
+        readFileSync(path, "utf8") === String(process.pid)
+      )
+        unlinkSync(path);
+    };
+  }
+  batches(): { dir: string; batch: Batch }[] {
+    const result: { dir: string; batch: Batch }[] = [];
+    const walk = (dir: string, depth: number) => {
+      if (depth > 4) return;
+      if (existsSync(join(dir, "batch.json"))) {
+        const batch = JSON.parse(
+          readFileSync(join(dir, "batch.json"), "utf8"),
+        ) as Batch;
+        if (batch.schemaVersion !== 1 || !Array.isArray(batch.jobs))
+          throw new Error(`Unsupported manifest: ${dir}`);
+        result.push({ dir, batch });
+        return;
+      }
+      for (const e of readdirSync(dir, { withFileTypes: true }))
+        if (e.isDirectory() && !e.name.startsWith("."))
+          walk(join(dir, e.name), depth + 1);
+    };
+    walk(this.root, 0);
+    return result.sort((a, b) =>
+      b.batch.createdAt.localeCompare(a.batch.createdAt),
+    );
+  }
+  create(spec: BatchSpec): { dir: string; batch: Batch } {
+    const rows = expandBatch(spec),
+      now = new Date().toISOString(),
+      id = randomUUID();
+    // Validate every input before creating a batch.
+    const inputs = new Map<string, Buffer>();
+    for (const row of rows)
+      for (const ref of row.references || []) {
+        const path = expand(ref);
+        const b = readFileSync(path);
+        imageMime(b);
+        if (b.length > 50 * 1024 * 1024)
+          throw new Error("Reference exceeds 50 MB");
+        inputs.set(path, b);
+      }
+    const slug =
+      spec.name
+        .normalize("NFKD")
+        .replace(/[^a-zA-Z0-9_-]+/g, "-")
+        .slice(0, 60) || "batch";
+    const dir = join(
+      this.root,
+      `${now.slice(0, 10)}-${slug}-${id.slice(0, 8)}`,
+    );
+    mkdirSync(join(dir, "inputs"), { recursive: true, mode: 0o700 });
+    const batch: Batch = {
+      schemaVersion: 1,
+      id,
+      name: spec.name,
+      createdAt: now,
+      jobs: [],
+    };
+    for (const row of rows) {
+      const model = validateRow(row),
+        references: string[] = [];
+      for (const ref of row.references || []) {
+        const path = expand(ref),
+          b = inputs.get(path)!;
+        const ext = imageMime(b).split("/")[1];
+        const name = `inputs/${hash(b)}.${ext}`;
+        if (!existsSync(join(dir, name)))
+          writeFileSync(join(dir, name), b, { mode: 0o600 });
+        references.push(name);
+      }
+      for (let i = 0; i < (row.count ?? 1); i++)
+        batch.jobs.push({
+          id: randomUUID(),
+          prompt: row.prompt.trim(),
+          model: model.id,
+          provider: model.provider,
+          settings: row.settings || {},
+          references,
+          parentIds: row.parentIds || [],
+          status: "queued",
+          attempts: 0,
+          createdAt: now,
+          updatedAt: now,
+          outputs: [],
+        });
+    }
+    this.save(dir, batch);
+    return { dir, batch };
+  }
+  save(dir: string, batch: Batch) {
+    atomicJson(join(dir, "batch.json"), batch);
+  }
+  findJob(id: string): { dir: string; batch: Batch; job: Job } {
+    const found = this.batches().flatMap(({ dir, batch }) =>
+      batch.jobs
+        .filter((j) => j.id.startsWith(id))
+        .map((job) => ({ dir, batch, job })),
+    );
+    if (found.length !== 1)
+      throw new Error(found.length ? "Ambiguous job ID" : "Job not found");
+    return found[0]!;
+  }
+  index(record: ImageRecord, path: string, metadataPath: string) {
+    this.db.run(
+      "INSERT INTO images(id,path,metadata_path,record) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET path=excluded.path,metadata_path=excluded.metadata_path,record=excluded.record",
+      [record.id, path, metadataPath, JSON.stringify(record)],
+    );
+  }
+  saveOutput(
+    dir: string,
+    batch: Batch,
+    job: Job,
+    bytes: Uint8Array,
+    index: number,
+  ): Output {
+    const mime = imageMime(bytes),
+      ext = mime.split("/")[1]!,
+      name = `${String(batch.jobs.indexOf(job) + 1).padStart(4, "0")}-${job.model}-${job.id.slice(0, 8)}-${index + 1}.${ext}`;
+    const output: Output = {
+      file: name,
+      hash: hash(bytes),
+      bytes: bytes.length,
+      mime,
+    };
+    const record: ImageRecord = {
+      schemaVersion: 1,
+      id: `${job.id}-${index}`,
+      jobId: job.id,
+      batchId: batch.id,
+      batchName: batch.name,
+      prompt: job.prompt,
+      model: job.model,
+      provider: job.provider,
+      settings: job.settings,
+      parentIds: job.parentIds,
+      references: job.references,
+      createdAt: new Date().toISOString(),
+      ...output,
+      tags: [],
+      favorite: false,
+      usage: job.usage,
+      requestId: job.requestId,
+    };
+    const path = join(dir, name),
+      meta = path + ".json";
+    // On recovery, preserve existing annotation sidecars for this exact output.
+    if (existsSync(meta)) {
+      const old = JSON.parse(readFileSync(meta, "utf8"));
+      if (old.id === record.id) {
+        record.tags = old.tags;
+        record.favorite = old.favorite;
+      }
+    }
+    const tmp = path + ".part";
+    writeFileSync(tmp, bytes, { mode: 0o600 });
+    renameSync(tmp, path);
+    atomicJson(meta, record);
+    this.index(record, path, meta);
+    return output;
+  }
+  rebuild(): number {
+    const entries: ImageEntry[] = [];
+    for (const { dir } of this.batches())
+      for (const f of readdirSync(dir))
+        if (f.endsWith(".json") && f !== "batch.json") {
+          const record = JSON.parse(
+            readFileSync(join(dir, f), "utf8"),
+          ) as ImageRecord;
+          if (record.schemaVersion !== 1 || !record.id || !record.file)
+            continue;
+          const path = inside(dir, record.file);
+          if (existsSync(path))
+            entries.push({ ...record, path, metadataPath: join(dir, f) });
+        }
+    this.db.transaction(() => {
+      this.db.run("DELETE FROM images");
+      for (const { path, metadataPath, ...record } of entries)
+        this.index(record, path, metadataPath);
+    })();
+    return entries.length;
+  }
+  images(query = "", favorite = false, sort = "newest"): ImageEntry[] {
+    const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+    const images = (
+      this.db.query("SELECT * FROM images").all() as {
+        path: string;
+        metadata_path: string;
+        record: string;
+      }[]
+    )
+      .map(
+        (r) =>
+          ({
+            ...JSON.parse(r.record),
+            path: r.path,
+            metadataPath: r.metadata_path,
+          }) as ImageEntry,
+      )
+      .filter(
+        (r) =>
+          (!favorite || r.favorite) &&
+          words.every((w) =>
+            `${r.prompt} ${r.model} ${r.provider} ${r.batchName} ${r.createdAt} ${r.tags.join(" ")}`
+              .toLowerCase()
+              .includes(w),
+          ),
+      );
+    return images.sort((a, b) =>
+      sort === "model"
+        ? a.model.localeCompare(b.model)
+        : sort === "oldest"
+          ? a.createdAt.localeCompare(b.createdAt)
+          : b.createdAt.localeCompare(a.createdAt),
+    );
+  }
+  annotate(
+    image: ImageEntry,
+    patch: Partial<Pick<ImageRecord, "tags" | "favorite">>,
+  ) {
+    const { path, metadataPath, ...record } = image;
+    Object.assign(record, patch);
+    atomicJson(metadataPath, record);
+    this.index(record, path, metadataPath);
+  }
+  export(
+    images: ImageEntry[],
+    destination: string,
+    metadata = true,
+    overwrite = false,
+  ): string[] {
+    const dir = expand(destination);
+    mkdirSync(dir, { recursive: true });
+    const outputs: string[] = [];
+    const targets = images.flatMap((i) => [
+      join(dir, basename(i.path)),
+      ...(metadata ? [join(dir, basename(i.metadataPath))] : []),
+    ]);
+    if (new Set(targets).size !== targets.length)
+      throw new Error("Selected images have conflicting export filenames");
+    for (const target of targets)
+      if (existsSync(target) && !overwrite)
+        throw new Error(`File exists: ${target}. Confirm overwrite first.`);
+    for (const i of images) {
+      for (const source of [i.path, ...(metadata ? [i.metadataPath] : [])]) {
+        const target = join(dir, basename(source));
+        if (resolve(source) === target)
+          throw new Error("Export destination is the source folder");
+        copyFileSync(source, target, overwrite ? 0 : constants.COPYFILE_EXCL);
+        outputs.push(target);
+      }
+    }
+    return outputs;
+  }
+}
