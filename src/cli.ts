@@ -480,15 +480,16 @@ export async function runCli(
         "TTY_REQUIRED",
         "Inline viewing requires a terminal; use image IMAGE_ID --json to obtain its path",
       );
+    const source = preview(image, 1200, 1, 0.5, 0.5, library.state);
+    const clip = image.mime === "image/gif" ? animation(image) : undefined;
     const r = await createCliRenderer({ exitOnCtrlC: false });
     let frame = 0,
       playing = true,
       loops = 0,
       timer: ReturnType<typeof setTimeout> | undefined;
-    const clip = image.mime === "image/gif" ? animation(image) : undefined;
     const picture = new ImageRenderable(r, {
       id: "image",
-      source: preview(image, 1200, 1, 0.5, 0.5, library.state),
+      source,
       width: "100%",
       height: "100%",
       fit: "fit",

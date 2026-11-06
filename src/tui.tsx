@@ -153,11 +153,15 @@ export function createApp(library: Library, engine: Engine) {
     });
     const current = () =>
       images()[Math.min(selected(), Math.max(0, images().length - 1))];
-    const clip = createMemo(() =>
-      full() && screen() === "Library" && current()?.mime === "image/gif"
-        ? animation(current()!)
-        : null,
-    );
+    const clip = createMemo(() => {
+      if (!full() || screen() !== "Library" || current()?.mime !== "image/gif")
+        return null;
+      try {
+        return animation(current()!);
+      } catch {
+        return null;
+      }
+    });
     createEffect(
       on(
         () => current()?.id,

@@ -180,3 +180,37 @@ test("GIF keyboard playback, frame stepping, explicit frame references and forma
     f.close();
   }
 });
+
+test("malformed GIF displays unavailable fallback without crashing full-screen navigation", async () => {
+  const f = fixture(),
+    e = new Engine(f.library, adapter(), defaults());
+  const old = process.env.IMAGEGEN_CONFIG_DIR;
+  process.env.IMAGEGEN_CONFIG_DIR = join(f.root, "config");
+  const { dir, batch } = f.library.create({
+    schemaVersion: 1,
+    name: "Broken animation",
+    rows: [{ prompt: "broken", model: "gpt-image-2.6-flare" }],
+  });
+  f.library.saveOutput(dir, batch, batch.jobs[0]!, Buffer.from("GIF89a"), 0);
+  const App = createApp(f.library, e);
+  const s = await testRender(() => <App />, {
+    width: 120,
+    height: 40,
+    exitOnCtrlC: false,
+  });
+  try {
+    await s.flush();
+    s.mockInput.pressKey("v");
+    await s.flush();
+    expect(s.captureCharFrame()).toContain("Image unavailable");
+    s.mockInput.pressEscape();
+    await Bun.sleep(40);
+    await s.flush();
+    expect(s.captureCharFrame()).toContain("Broken animation");
+  } finally {
+    s.renderer.destroy();
+    await e.close();
+    process.env.IMAGEGEN_CONFIG_DIR = old;
+    f.close();
+  }
+});
