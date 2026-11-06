@@ -6,12 +6,19 @@ export type Provider =
   | "bfl"
   | "fal"
   | "xai";
-export type Settings = Record<string, string | number | boolean>;
+export type SettingValue =
+  | string
+  | number
+  | boolean
+  | { [key: string]: SettingValue };
+export type Settings = Record<string, SettingValue>;
 export interface BatchRow {
   prompt: string;
   model: string;
   provider?: Provider;
   references?: string[];
+  mask?: string;
+  markup?: string;
   parentIds?: string[];
   settings?: Settings;
   count?: number;
@@ -57,6 +64,8 @@ export interface Job {
   provider: Provider;
   settings: Settings;
   references: string[];
+  mask?: string;
+  markup?: string;
   parentIds: string[];
   status: Status;
   attempts: number;
@@ -67,6 +76,10 @@ export interface Job {
   results?: string[];
   outputs: Output[];
   usage?: unknown;
+  svgUsage?: unknown;
+  effectiveSettings?: Settings;
+  errorCode?: string;
+  preview?: { path: string; index: number; updatedAt: string };
   requestId?: string;
 }
 export interface Batch {
@@ -90,6 +103,8 @@ export interface ImageRecord {
   settings: Settings;
   parentIds: string[];
   references: string[];
+  mask?: string;
+  markup?: string;
   createdAt: string;
   file: string;
   hash: string;
@@ -98,6 +113,8 @@ export interface ImageRecord {
   tags: string[];
   favorite: boolean;
   usage?: unknown;
+  svgUsage?: unknown;
+  effectiveSettings?: Settings;
   requestId?: string;
 }
 export interface ImageEntry extends ImageRecord {

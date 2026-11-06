@@ -1,6 +1,6 @@
 {
   "name": "imagegen-cli",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Concurrent image generation and a portable terminal image library",
   "private": true,
   "type": "module",
@@ -17,11 +17,14 @@
     "build": "bun run build.ts",
     "check": "bunx tsc --noEmit",
     "test": "bun test --preload @opentui/solid/preload",
-    "format": "prettier --write src tests build.ts"
+    "format": "prettier --write src tests build.ts",
+    "smoke": "bun run scripts/smoke-release.ts"
   },
   "dependencies": {
     "@opentui/core": "0.5.17",
     "@opentui/solid": "0.5.17",
+    "@resvg/resvg-js": "2.6.2",
+    "gifuct-js": "2.1.2",
     "pngjs": "^7.0.0",
     "solid-js": "1.9.12"
   },

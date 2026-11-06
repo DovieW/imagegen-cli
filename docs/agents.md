@@ -9,7 +9,7 @@ imagegen schema --json
 imagegen schema batch --json
 imagegen help generate --json
 imagegen models --json
-imagegen models gpt-image-2.5-flare --json
+imagegen models gpt-image-2.6-flare --json
 imagegen doctor --json
 ```
 
@@ -20,7 +20,7 @@ imagegen doctor --json
 ```sh
 # Use a logical, stable request key for this generation step.
 imagegen generate --prompt-file prompt.txt \
-  --model gpt-image-2.5-flare --count 3 \
+  --model gpt-image-2.6-flare --count 3 \
   --settings '{"quality":"medium","size":"1024x1536"}' \
   --request-key story-cover-v1 --json > result.json
 
@@ -36,7 +36,7 @@ imagegen library --tag story-cover --favorite --limit 20 --json
 imagegen export IMAGE_ID --to ./selected --json
 ```
 
-`--from` accepts existing image IDs, supplies their original images as references, and records parent lineage automatically. Repeat it to combine images. Without `--model`, it uses the first source image's model; without sources, the default is `gpt-image-2.5-flare`. `--ref PATH` accepts arbitrary local images; `--parent-id ID` records explicit lineage. Reference snapshots travel with the batch.
+`--from` accepts existing image IDs, supplies their original images as references, and records parent lineage automatically. Repeat it to combine images. Without `--model`, it uses the first source image's model; without sources, the default is `gpt-image-2.6-flare`. `--ref PATH` accepts arbitrary local images; `--parent-id ID` records explicit lineage. Reference snapshots travel with the batch.
 
 Generation waits for the requested jobs and returns their results, including any partial successes. Each image output includes `imageId`, `path`, `metadataPath`, `mime`, `bytes`, and `hash`. Read `.data.jobs[].status` and `.error` to diagnose failures. Signed provider download URLs and base64 result payloads are excluded from CLI responses.
 
@@ -49,7 +49,7 @@ cat batch.json | imagegen batch - --request-key cover-comparison-v1 --json
 printf '%s' 'A watercolor forest library' | imagegen generate --prompt - --json
 ```
 
-Batch v1 supports independent rows and optional Cartesian-product matrices of prompts, models, settings, and counts. Obtain the schema from `imagegen schema batch --json` and an example from `examples/batch.json`. Local reference paths resolve relative to the batch file, or the current directory for stdin. `--dry-run` validates and expands the configuration without submitting; reference files are validated and snapshotted during execution. `--settings-file FILE` avoids shell quoting of JSON settings.
+Batch v1 supports independent rows and optional Cartesian-product matrices of prompts, models, settings, and counts. Obtain the schema from `imagegen schema batch --json` and an example from `examples/batch.json`. Local reference paths resolve relative to the batch file, or the current directory for stdin. `--dry-run` validates and expands the configuration without submitting; references, masks, and markup are read and validated during dry-run, then snapshotted during execution. `--settings-file FILE` avoids shell quoting of JSON settings.
 
 ## Idempotency and recovery
 
@@ -109,3 +109,15 @@ Errors have `ok:false` and `error:{code,message,details?}`. Incomplete jobs and 
 | 130 / 143 | SIGINT / SIGTERM |
 
 Credentials never belong in prompts, batch files, request keys, logs, or command arguments. Use configured environment variables or the system wallet. `doctor --json` reports credential sources without revealing values. If you select another image root with `IMAGEGEN_ROOT`, use the same root when polling or controlling its jobs.
+
+## Version 0.3 capabilities
+
+`models ID --json` retains `options` and adds `settingsSchema` plus human-readable compatibility `constraints`. Prefer the schema for complete settings, including nested `svg.model` and `svg.reasoning.effort`. Unknown nested settings fail before submission. Batch/response envelopes remain schema version 1 with additive fields.
+
+Generation accepts `--mask FILE` or `--markup FILE`, corresponding to optional row properties in batch JSON. They apply to the first reference; input paths resolve relative to a batch file, or cwd for stdin. Model/format combinations and input files validate before submission. SVG/GIF are outputs, not implicit raster inputs.
+
+Use `imagegen rasterize IMAGE_ID [--frame ZERO_BASED_INDEX] --json` for an explicit PNG conversion. The result returns `path`, `mime`, and `sourceImageId`. Pass that path with `--ref` and the source ID with `--parent-id` to retain lineage. `library --format png|jpeg|webp|svg|gif --json` filters by original format.
+
+Streaming is opt-in: `--settings '{"stream":true,"partial_images":2}'`. JSONL may emit `{schemaVersion:1,event:"preview",data:{jobId,path,index,updatedAt}}` events before the final result. Preview files are rebuildable cache data, not completed outputs. Clients may miss short-lived previews while polling; always use final job status/output paths as the completion contract. Ordinary `--json` still emits exactly one final envelope. Base64 payloads never appear in CLI output.
+
+SVG/GIF access failures never trigger automatic substitutions. Quota errors are not retried. Structured provider `errorCode` and request IDs are available on jobs where known; generic errors remain redacted. Interrupted streams do not authorize automatic resubmission. SVG author usage is separate from image usage. The app keeps one provider output per independent job, so `--count` preserves existing concurrency and retry semantics.

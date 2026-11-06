@@ -44,11 +44,11 @@ The grid mounts only the visible page. Native image decoding, scaling, and cropp
 
 ## Supported model routes
 
-These routes are based on provider documentation checked November 2, 2026. Actual availability depends on your account, region, deployment, and provider policies. Only OpenAI authentication/model-list access has been checked against a live account during development; generation adapters are tested with mocked responses.
+These routes are based on provider documentation checked November 2, 2026, with OpenAI 2.6 capabilities refreshed November 6. Actual availability depends on your account, region, deployment, and provider policies. Only OpenAI authentication/model-list access has been checked against a live account during development; generation adapters are tested with mocked responses.
 
 | Models | Route | Credential |
 | --- | --- | --- |
-| GPT Image 2.5 Sunburst, GPT Image 2.5 Flare, GPT Image 2 | [OpenAI Images API](https://developers.openai.com/api/docs/guides/image-generation) | `OPENAI_API_KEY` |
+| GPT Image 2.6 Sunburst/Flare, GPT Image 2.5 Sunburst/Flare, GPT Image 2 | [OpenAI Images API](https://developers.openai.com/api/docs/guides/image-generation) | `OPENAI_API_KEY` |
 | Nano Banana 2.1, Nano Banana 2 Lite, Nano Banana 2 | [Google Interactions API](https://ai.google.dev/gemini-api/docs/image-generation) | `GEMINI_API_KEY` |
 | MAI-Image 2.6, MAI-Image 2.6 Flash | [Azure MAI Images API](https://learn.microsoft.com/en-us/azure/foundry/foundry-models/how-to/use-foundry-models-mai-image) | `AZURE_API_KEY`, `AZURE_ENDPOINT` |
 | Grok Imagine Image 2.0 | [xAI Images API](https://docs.x.ai/developers/model-capabilities/images/generation) | `XAI_API_KEY` |
@@ -105,12 +105,41 @@ imagegen view IMAGE_ID
 imagegen export IMAGE_ID --to ~/Pictures/selected
 ```
 
-Batch JSON has `schemaVersion: 1`, a `name`, and `rows`. Each row contains `prompt`, `model`, optional `provider`, `references`, `parentIds`, `settings`, and `count`. Optional `matrix` contains `prompts`, `models`, an array of `settings`, optional `references`, and `count`; it expands their Cartesian product and appends it to explicit rows. References in imported batch files resolve relative to the JSON file. The TUI's matrix builder combines prompts and models; row duplication and settings editing cover additional variants. The CLI also supports complete settings matrices. Review a real example in [examples/batch.json](examples/batch.json).
+Batch JSON has `schemaVersion: 1`, a `name`, and `rows`. Each row contains `prompt`, `model`, optional `provider`, `references`, `mask`, `markup`, `parentIds`, `settings`, and `count`. Optional `matrix` contains `prompts`, `models`, an array of `settings`, optional `references`, and `count`; it expands their Cartesian product and appends it to explicit rows. References in imported batch files resolve relative to the JSON file. The TUI's matrix builder combines prompts and models; row duplication and settings editing cover additional variants. The CLI also supports complete settings matrices. Review a real example in [examples/batch.json](examples/batch.json).
 
-`--dry-run` validates model settings and displays expanded configurations without submitting or creating a batch. It does not read reference files; execution validates and snapshots them before submitting.
+`--dry-run` validates model settings and displays expanded configurations without submitting or creating a batch. It reads and validates references, masks, and markup without credentials or creating a batch. Execution snapshots these inputs before submitting.
 
 Configuration uses `${XDG_CONFIG_HOME:-~/.config}/imagegen`; the index/cache uses `${XDG_STATE_HOME:-~/.local/state}/imagegen`. Override with `IMAGEGEN_CONFIG_DIR`, `IMAGEGEN_STATE_DIR`, and `IMAGEGEN_ROOT`.
 
 ## Development validation
 
 `npm test` covers matrix validation, provider-specific payloads, scheduler concurrency, independent failures, ambiguous outcomes, interruption, recovery, expired URLs, portable metadata/index rebuilding, export collisions, thumbnail decoding/cropping, and keyboard-driven TUI generation. Dependency overrides pin patched Seroval, glob, and minimatch versions while retaining the Solid peer version required by OpenTUI. `npm run check` type-checks the code and `npm run build` creates the standalone executable. Live generations require a separate agreed spending allowance.
+
+## GPT Image 2.6
+
+New generations default to `gpt-image-2.6-flare`. Sunburst is available as `gpt-image-2.6-sunburst`; existing model IDs and saved batches remain supported. `--from` continues to use the source model unless overridden. See [OpenAI's guide](https://developers.openai.com/api/docs/guides/image-generation) and [the mixed-format example](examples/openai26.json).
+
+Both 2.6 models expose complexity (`low`, `medium`, `high`, provider default `high`), quality through `max`, transparency, custom dimensions, JPEG/WebP compression, moderation, SVG, GIF, and raster streaming. GPT Image 2.5 also gains `xhigh`/`max`, custom raster sizes, transparency, compression, and streaming. `imagegen models ID --json` exposes `settingsSchema` and compatibility constraints; the TUI uses that same schema. Omitted values retain provider defaults.
+
+```sh
+imagegen generate --prompt 'A detailed botanical diagram' --settings '{"complexity":"high","quality":"max","size":"1536x864"}'
+imagegen generate --prompt 'Recolor the circled vase blue' --ref kitchen.png --markup overlay.png
+imagegen generate --prompt 'A looping lantern animation' --settings '{"output_format":"gif","frame_count":9,"frame_duration_ms":200}'
+imagegen generate --prompt 'Animate the clouds' --ref landscape.png --settings '{"output_format":"gif"}'
+imagegen generate --prompt 'A simple geometric tree logo' --settings '{"output_format":"svg"}'
+imagegen generate --prompt 'A moonlit library' --settings '{"stream":true,"partial_images":2}' --jsonl
+imagegen library --format svg --json
+imagegen rasterize IMAGE_ID --frame 0 --json
+```
+
+Mask/markup inputs are PNGs with transparent pixels and dimensions matching the oriented first reference. They are mutually exclusive; markup requires 2.5/2.6. The row editor provides file selection and overlay preview. Inputs are immutable snapshots and participate in request-key hashing. This release imports overlays rather than providing a drawing editor.
+
+SVG generation preserves original vector bytes and caches raster previews. SVG requires generation without references, streaming, compression, or frame controls. Advanced author selection uses nested settings such as `{"output_format":"svg","svg":{"model":"YOUR_ACCESSIBLE_AUTHOR_MODEL","reasoning":{"effort":"high"}}}`; access and supported reasoning efforts depend on the account/model. Separate author usage is saved as `svgUsage`.
+
+GIF supports generation and animation from still references, with 2–16 frames (default 9), 20–2000 ms per frame (default 200), rounded to 10 ms. GIF preview access is required. Streaming, compression, masks, and markup are excluded for GIF. Automatic GIF sizing is recommended; the provider validates its current pixel budget. No model or format is silently substituted after an access error.
+
+Gallery thumbnails remain still. **T** filters formats. In full-screen GIF viewing, **Space** toggles playback and **[ / ]** steps frames. Navigation stops playback. Playback updates the existing OpenTUI image widget, including its Kitty graphics path in Ghostty. SVG/GIF originals export unchanged with sidecars. “Rasterize as reference” and “Use current frame as reference” make explicit PNG inputs and retain parent lineage. The standalone `view` command also handles SVG and GIF playback.
+
+Partial raster previews appear in Jobs and as `preview` JSONL events containing a job ID, local cache path, index, and timestamp. Previews do not become library images or successful results. An interrupted stream without a final image remains uncertain and requires explicit retry. Partial previews have provider token costs; they are opt-in. SVG/GIF cannot stream.
+
+`effectiveSettings`, image usage, separate SVG usage, and structured provider error codes/request IDs travel with saved metadata where available. API preview access, exact GIF pixel budgets, SVG author permissions, and paid generation quality are not established by fixture tests. This release uses the direct Images API; persistent Responses conversations are outside this release.

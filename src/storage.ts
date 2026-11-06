@@ -23,6 +23,12 @@ import {
 } from "node:path";
 import { atomicJson, expand, imageRoot, stateRoot } from "./config";
 import { validateRow } from "./models";
+import {
+  mediaMime,
+  mediaExtension,
+  validateOverlay,
+  validateRaster,
+} from "./media";
 import { CliError } from "./errors";
 import type {
   Batch,
@@ -42,17 +48,41 @@ export function inside(root: string, path: string): string {
     throw new Error("Invalid artifact path");
   return p;
 }
-export function imageMime(data: Uint8Array): string {
-  const b = Buffer.from(data);
-  if (b.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])))
-    return "image/png";
-  if (b[0] === 255 && b[1] === 216 && b[2] === 255) return "image/jpeg";
-  if (
-    b.toString("ascii", 0, 4) === "RIFF" &&
-    b.toString("ascii", 8, 12) === "WEBP"
-  )
-    return "image/webp";
-  throw new Error("Expected a PNG, JPEG, or WebP image");
+export const imageMime = (data: Uint8Array) => mediaMime(data, true);
+export function validateInputs(rows: BatchRow[]) {
+  const inputs = new Map<string, Buffer>();
+  for (const row of rows) {
+    for (const ref of [
+      ...(row.references ?? []),
+      ...([row.mask, row.markup].filter(Boolean) as string[]),
+    ]) {
+      const path = expand(ref);
+      if (statSync(path).size > 50 * 1024 * 1024)
+        throw new Error("Input exceeds 50 MB");
+      const bytes = readFileSync(path);
+      validateRaster(bytes);
+      if (bytes.length > 50 * 1024 * 1024)
+        throw new Error("Input exceeds 50 MB");
+      inputs.set(path, bytes);
+    }
+    for (const kind of ["mask", "markup"] as const)
+      if (row[kind])
+        validateOverlay(
+          inputs.get(expand(row[kind]!))!,
+          inputs.get(expand(row.references![0]!))!,
+          kind === "markup",
+        );
+  }
+  return inputs;
+}
+function canonical(value: unknown): unknown {
+  if (value && typeof value === "object" && !Array.isArray(value))
+    return Object.fromEntries(
+      Object.entries(value)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([k, v]) => [k, canonical(v)]),
+    );
+  return value;
 }
 export function expandBatch(spec: BatchSpec): BatchRow[] {
   if (
@@ -190,11 +220,11 @@ export class Library {
         model: m.id,
         provider: m.provider,
         count: row.count ?? 1,
-        settings: Object.fromEntries(
-          Object.entries(row.settings || {}).sort(([a], [b]) =>
-            a.localeCompare(b),
-          ),
-        ),
+        settings: canonical(row.settings || {}),
+        ...(row.mask ? { mask: hash(readFileSync(expand(row.mask))) } : {}),
+        ...(row.markup
+          ? { markup: hash(readFileSync(expand(row.markup))) }
+          : {}),
         parentIds: row.parentIds || [],
         references: (row.references || []).map((p) =>
           hash(readFileSync(expand(p))),
@@ -227,16 +257,7 @@ export class Library {
       now = new Date().toISOString(),
       id = randomUUID();
     // Validate every input before creating a batch.
-    const inputs = new Map<string, Buffer>();
-    for (const row of rows)
-      for (const ref of row.references || []) {
-        const path = expand(ref);
-        const b = readFileSync(path);
-        imageMime(b);
-        if (b.length > 50 * 1024 * 1024)
-          throw new Error("Reference exceeds 50 MB");
-        inputs.set(path, b);
-      }
+    const inputs = validateInputs(rows);
     const slug =
       spec.name
         .normalize("NFKD")
@@ -257,15 +278,16 @@ export class Library {
     for (const row of rows) {
       const model = validateRow(row),
         references: string[] = [];
-      for (const ref of row.references || []) {
-        const path = expand(ref),
-          b = inputs.get(path)!;
-        const ext = imageMime(b).split("/")[1];
-        const name = `inputs/${hash(b)}.${ext}`;
+      const snapshot = (ref: string) => {
+        const b = inputs.get(expand(ref))!,
+          name = `inputs/${hash(b)}.${mediaExtension(imageMime(b))}`;
         if (!existsSync(join(dir, name)))
           writeFileSync(join(dir, name), b, { mode: 0o600 });
-        references.push(name);
-      }
+        return name;
+      };
+      for (const ref of row.references || []) references.push(snapshot(ref));
+      const mask = row.mask ? snapshot(row.mask) : undefined,
+        markup = row.markup ? snapshot(row.markup) : undefined;
       for (let i = 0; i < (row.count ?? 1); i++)
         batch.jobs.push({
           id: randomUUID(),
@@ -274,6 +296,8 @@ export class Library {
           provider: model.provider,
           settings: row.settings || {},
           references,
+          ...(mask ? { mask } : {}),
+          ...(markup ? { markup } : {}),
           parentIds: row.parentIds || [],
           status: "queued",
           attempts: 0,
@@ -311,8 +335,8 @@ export class Library {
     bytes: Uint8Array,
     index: number,
   ): Output {
-    const mime = imageMime(bytes),
-      ext = mime.split("/")[1]!,
+    const mime = mediaMime(bytes),
+      ext = mediaExtension(mime),
       name = `${String(batch.jobs.indexOf(job) + 1).padStart(4, "0")}-${job.model}-${job.id.slice(0, 8)}-${index + 1}.${ext}`;
     const output: Output = {
       file: name,
@@ -332,6 +356,10 @@ export class Library {
       settings: job.settings,
       parentIds: job.parentIds,
       references: job.references,
+      mask: job.mask,
+      markup: job.markup,
+      svgUsage: job.svgUsage,
+      effectiveSettings: job.effectiveSettings,
       createdAt: new Date().toISOString(),
       ...output,
       tags: [],

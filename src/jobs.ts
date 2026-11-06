@@ -1,3 +1,6 @@
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { mediaMime, mediaExtension } from "./media";
 import { EventEmitter } from "node:events";
 import { loadConfig, type Config } from "./config";
 import { Library } from "./storage";
@@ -110,7 +113,31 @@ export class Engine extends EventEmitter {
           job.error = undefined;
           this.save(id);
           try {
-            const receipt = await this.adapter.submit(job, dir, signal);
+            const receipt = await this.adapter.submit(
+              job,
+              dir,
+              signal,
+              ({ preview, index }) => {
+                const bytes = Buffer.from(
+                  preview.slice(preview.indexOf(",") + 1),
+                  "base64",
+                );
+                const mime = mediaMime(bytes, true);
+                const cache = join(this.library.state, "previews");
+                mkdirSync(cache, { recursive: true, mode: 0o700 });
+                const path = join(
+                  cache,
+                  `${job.id}-${index}.${mediaExtension(mime)}`,
+                );
+                writeFileSync(path, bytes, { mode: 0o600 });
+                job.preview = {
+                  path,
+                  index,
+                  updatedAt: new Date().toISOString(),
+                };
+                this.save(id);
+              },
+            );
             Object.assign(job, receipt);
             if (signal.aborted) {
               if (String(job.status) !== "cancelled") job.status = "paused";
@@ -126,6 +153,9 @@ export class Engine extends EventEmitter {
             if (
               error instanceof HttpError &&
               error.status === 429 &&
+              !["insufficient_quota", "billing_hard_limit_reached"].includes(
+                error.code || "",
+              ) &&
               retry < 3
             ) {
               job.status = "queued";
@@ -192,7 +222,12 @@ export class Engine extends EventEmitter {
       job.status = "completed";
       job.error = undefined;
       delete job.results;
+      delete job.preview;
     } catch (error) {
+      if (error instanceof HttpError) {
+        job.errorCode = error.code;
+        job.requestId = error.requestId;
+      }
       if (signal.aborted) {
         if (job.status !== "cancelled")
           job.status = ["submitting", "uncertain"].includes(job.status)
@@ -257,6 +292,10 @@ export class Engine extends EventEmitter {
           results: undefined,
           requestId: undefined,
           usage: undefined,
+          svgUsage: undefined,
+          effectiveSettings: undefined,
+          errorCode: undefined,
+          preview: undefined,
           error: undefined,
         };
         e.batch.jobs.push(job);

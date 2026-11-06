@@ -5,7 +5,17 @@ import {
   useRenderer,
   useTerminalDimensions,
 } from "@opentui/solid";
-import { createMemo, createSignal, For, Show, onCleanup } from "solid-js";
+import {
+  createMemo,
+  createSignal,
+  For,
+  Show,
+  onCleanup,
+  createEffect,
+  on,
+} from "solid-js";
+import { NativeImage } from "@opentui/core";
+import { PNG } from "pngjs";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { authentication, AUTH_PROVIDERS } from "./auth";
@@ -16,11 +26,17 @@ import {
   loadConfig,
   saveConfig,
 } from "./config";
-import { MODELS, modelFor, validateRow } from "./models";
+import {
+  MODELS,
+  modelFor,
+  validateRow,
+  DEFAULT_MODEL,
+  settingsSchema,
+} from "./models";
 import { Engine } from "./jobs";
 import { serveEngine } from "./control";
-import { expandBatch, Library } from "./storage";
-import { preview, openExternal } from "./viewer";
+import { expandBatch, Library, validateInputs } from "./storage";
+import { preview, openExternal, animation, rasterize } from "./viewer";
 import { pathSuggestions } from "./paths";
 import type { BatchRow, BatchSpec, ImageEntry, Provider } from "./types";
 const C = {
@@ -70,6 +86,13 @@ export function createApp(library: Library, engine: Engine) {
     const [full, setFull] = createSignal(false),
       [zoom, setZoom] = createSignal(1),
       [pan, setPan] = createSignal({ x: 0.5, y: 0.5 });
+    const [format, setFormat] = createSignal("");
+    const [frame, setFrame] = createSignal(0),
+      [playing, setPlaying] = createSignal(true);
+    const [overlayPreview, setOverlayPreview] = createSignal<Uint8Array | null>(
+      null,
+    );
+    let loops = 0;
     const [compare, setCompare] = createSignal<ImageEntry | null>(null),
       [marked, setMarked] = createSignal(new Set<string>());
     const [dialog, setDialog] = createSignal<Dialog | null>(null),
@@ -113,7 +136,13 @@ export function createApp(library: Library, engine: Engine) {
     };
     const images = createMemo(() => {
       version();
-      const items = library.images(query(), favoriteOnly(), sort());
+      const items = library
+        .images(query(), favoriteOnly(), sort())
+        .filter(
+          (i) =>
+            !format() ||
+            i.mime === `image/${format() === "svg" ? "svg+xml" : format()}`,
+        );
       if (group()) {
         const order = new Map<string, number>();
         for (const i of items)
@@ -124,6 +153,37 @@ export function createApp(library: Library, engine: Engine) {
     });
     const current = () =>
       images()[Math.min(selected(), Math.max(0, images().length - 1))];
+    const clip = createMemo(() =>
+      full() && screen() === "Library" && current()?.mime === "image/gif"
+        ? animation(current()!)
+        : null,
+    );
+    createEffect(
+      on(
+        () => current()?.id,
+        () => {
+          setFrame(0);
+          setPlaying(true);
+          loops = 0;
+        },
+      ),
+    );
+    createEffect(() => {
+      const a = clip(),
+        n = frame();
+      if (!a || !playing() || dialog() || actions()) return;
+      const timer = setTimeout(() => {
+        if (n + 1 >= a.frames.length) {
+          loops++;
+          if (a.loops && loops >= a.loops) {
+            setPlaying(false);
+            return;
+          }
+        }
+        setFrame((n + 1) % a.frames.length);
+      }, a.frames[n]?.delay || 100);
+      onCleanup(() => clearTimeout(timer));
+    });
     const jobs = createMemo(() => {
       version();
       return [...engine.entries.values()].reverse();
@@ -237,7 +297,7 @@ export function createApp(library: Library, engine: Engine) {
     const makeRow = (reference?: ImageEntry) => {
       const row: BatchRow = {
         prompt: reference ? "Describe your edit" : "Describe the image",
-        model: reference?.model || MODELS[1]!.id,
+        model: reference?.model || DEFAULT_MODEL,
         references: reference ? [reference.path] : [],
         parentIds: reference ? [reference.id] : [],
         settings: {},
@@ -331,6 +391,45 @@ export function createApp(library: Library, engine: Engine) {
               },
             ]),
         },
+        ...(["mask", "markup"] as const).map((kind) => ({
+          name: kind === "mask" ? "Edit mask" : "Edit markup",
+          description: r[kind] || "None",
+          run: () =>
+            ask({
+              title: `${kind} PNG path · blank removes`,
+              path: true,
+              value: r[kind],
+              submit: (v) => {
+                updateRow(i, { [kind]: v ? expand(v) : undefined });
+                setDialog(null);
+              },
+            }),
+        })),
+        {
+          name: "Preview edit overlay",
+          run: () => {
+            const overlay = r.markup || r.mask;
+            if (!overlay || !r.references?.[0])
+              throw new Error("Choose a reference and mask/markup first");
+            validateRow(r);
+            validateInputs([r]);
+            const base = NativeImage.decode(readFileSync(r.references[0])),
+              layer = NativeImage.decode(readFileSync(overlay));
+            let composed: NativeImage | undefined;
+            try {
+              composed = base.composite(layer, { opacity: 0.6 });
+              const raw = composed.raw(),
+                png = new PNG({ width: raw.width, height: raw.height });
+              png.data = Buffer.from(raw.data);
+              setOverlayPreview(PNG.sync.write(png));
+              setActions(null);
+            } finally {
+              composed?.dispose();
+              base.dispose();
+              layer.dispose();
+            }
+          },
+        },
         {
           name: "Model settings",
           description: JSON.stringify(r.settings || {}),
@@ -343,25 +442,15 @@ export function createApp(library: Library, engine: Engine) {
                   setActions(null);
                 },
               },
-              ...Object.entries(modelFor(r.model).options).map(
-                ([key, allowed]) => ({
-                  name: key,
-                  description: `Current: ${r.settings?.[key] ?? "provider default"}`,
-                  run: () => {
-                    if (allowed === "integer")
-                      ask({
-                        title: key,
-                        value: String(r.settings?.[key] ?? ""),
-                        submit: (v) => {
-                          updateRow(i, {
-                            settings: { ...r.settings, [key]: Number(v) },
-                          });
-                          setDialog(null);
-                        },
-                      });
-                    else
-                      menu(
-                        allowed.map((v) => ({
+              ...Object.entries(
+                settingsSchema(modelFor(r.model)).properties || {},
+              ).map(([key, rule]) => ({
+                name: key,
+                description: `Current: ${JSON.stringify(r.settings?.[key] ?? "provider default")}`,
+                run: () =>
+                  rule.enum
+                    ? menu(
+                        rule.enum.map((v) => ({
                           name: String(v),
                           run: () => {
                             updateRow(i, {
@@ -370,10 +459,31 @@ export function createApp(library: Library, engine: Engine) {
                             setActions(null);
                           },
                         })),
-                      );
-                  },
-                }),
-              ),
+                      )
+                    : ask({
+                        title: `${key}${rule.type === "object" ? " (JSON)" : ""} · blank removes setting`,
+                        value:
+                          r.settings?.[key] === undefined
+                            ? ""
+                            : typeof r.settings[key] === "object"
+                              ? JSON.stringify(r.settings[key])
+                              : String(r.settings[key]),
+                        submit: (v) => {
+                          const settings = { ...r.settings };
+                          if (!v) delete settings[key];
+                          else
+                            settings[key] =
+                              rule.type === "integer"
+                                ? Number(v)
+                                : rule.type === "object" ||
+                                    rule.type === "boolean"
+                                  ? JSON.parse(v)
+                                  : v;
+                          updateRow(i, { settings });
+                          setDialog(null);
+                        },
+                      }),
+              })),
             ]),
         },
         {
@@ -399,6 +509,7 @@ export function createApp(library: Library, engine: Engine) {
         rows: rows(),
       };
       const expanded = expandBatch(spec);
+      validateInputs(expanded);
       const n = expanded.reduce((s, r) => s + (r.count || 1), 0);
       menu([
         {
@@ -562,7 +673,27 @@ export function createApp(library: Library, engine: Engine) {
             setActions(null);
           },
         },
-        { name: "Use as reference / edit", run: () => makeRow(image) },
+        {
+          name:
+            image.mime === "image/svg+xml"
+              ? "Rasterize as reference"
+              : image.mime === "image/gif"
+                ? "Use current frame as reference"
+                : "Use as reference / edit",
+          run: () =>
+            makeRow(
+              ["image/svg+xml", "image/gif"].includes(image.mime)
+                ? {
+                    ...image,
+                    path: rasterize(
+                      image,
+                      image.mime === "image/gif" ? frame() : 0,
+                      library.state,
+                    ),
+                  }
+                : image,
+            ),
+        },
         {
           name: image.favorite ? "Remove favorite" : "Favorite",
           run: () => {
@@ -827,6 +958,11 @@ export function createApp(library: Library, engine: Engine) {
         return;
       }
       if (dialog()?.secret) {
+        if (overlayPreview()) {
+          if (key.name === "escape" || key.name === "return")
+            setOverlayPreview(null);
+          return;
+        }
         if (key.name === "escape") {
           setDialog(null);
           setSecret("");
@@ -915,6 +1051,36 @@ export function createApp(library: Library, engine: Engine) {
       }
       if (screen() === "Library") {
         key.preventDefault();
+        if (key.name === "t") {
+          menu(
+            ["", "png", "jpeg", "webp", "svg", "gif"].map((f) => ({
+              name: f || "All formats",
+              run: () => {
+                setFormat(f);
+                setSelected(0);
+                setActions(null);
+              },
+            })),
+          );
+          return;
+        }
+        if (
+          full() &&
+          clip() &&
+          (key.name === "space" || ["[", "]"].includes(key.sequence))
+        ) {
+          if (key.name === "space") setPlaying(!playing());
+          else {
+            setPlaying(false);
+            setFrame(
+              (frame() +
+                (key.sequence === "[" ? -1 : 1) +
+                clip()!.frames.length) %
+                clip()!.frames.length,
+            );
+          }
+          return;
+        }
         const step =
           key.name === "left"
             ? -1
@@ -1007,7 +1173,15 @@ export function createApp(library: Library, engine: Engine) {
     });
     const safePreview = (image: ImageEntry, width: number, z = 1) => {
       try {
-        return preview(image, width, z, pan().x, pan().y, library.state);
+        return preview(
+          image,
+          width,
+          z,
+          pan().x,
+          pan().y,
+          library.state,
+          full() && image.id === current()?.id ? frame() : 0,
+        );
       } catch {
         return undefined;
       }
@@ -1041,6 +1215,10 @@ export function createApp(library: Library, engine: Engine) {
         </Show>
       );
     }
+    const previewJob = () => {
+      version();
+      return jobs()[jobIndex()]?.job;
+    };
     const filteredActions = () =>
       actions()?.filter((a) =>
         a.name.toLowerCase().includes(actionQuery().toLowerCase()),
@@ -1291,6 +1469,17 @@ export function createApp(library: Library, engine: Engine) {
               Enter control selected job · Ctrl-C pause queue · Ctrl-P resume
               paused jobs
             </text>
+            <Show when={previewJob()?.preview}>
+              <box height={12}>
+                <image
+                  source={previewJob()!.preview!.path}
+                  protocol="auto"
+                  fit="fit"
+                  width="100%"
+                  height="100%"
+                />
+              </box>
+            </Show>
           </Show>
           <Show when={screen() === "Authentication"}>
             <text fg={C.muted}>{authStatus()}</text>
@@ -1316,7 +1505,7 @@ export function createApp(library: Library, engine: Engine) {
             <scrollbox flexGrow={1} focused={!dialog() && !actions()}>
               <text
                 fg={C.text}
-              >{`Generate\n  N adds a row. Enter edits prompt, model, copies, references, and settings.\n  A opens batch actions: matrix, presets, JSON import/export, review/start.\n  New batches can start while others run.\n\nLibrary\n  Arrows navigate · Enter actions · / search · V full screen\n  F favorite · S favorites only · Space multi-select · E export · O external viewer\n  Full screen: +/- zoom · HJKL pan · 0 fit · arrows next image\n  Pin an image from its action menu to compare with another.\n\nJobs\n  Enter resumes, explicitly retries, or cancels a job. Ctrl-C pauses queued work.\n  Exit waits for active requests or interrupts locally. Remote work may continue.\n  Interrupted submissions without a receipt need explicit retry confirmation.\n\nNavigation\n  Tab next screen · Ctrl-P action palette · F1 help · Esc back · Ctrl-Q quit\n  Path prompts: Tab complete; click a suggestion, Enter accepts the path.\n\nImages and metadata live together under ${library.root}.\nThe index can be rebuilt from Settings. Export copies originals and metadata.\nUse imagegen --help for CLI commands and batch file options.`}</text>
+              >{`Generate\n  N adds a row. Enter edits prompt, model, copies, references, and settings.\n  A opens batch actions: matrix, presets, JSON import/export, review/start.\n  New batches can start while others run.\n\nLibrary\n  Arrows navigate · Enter actions · / search · V full screen\n  F favorite · S favorites only · Space multi-select · E export · O external viewer\n  T filters formats · Full screen GIF: Space play/pause · [ ] frames\n  Full screen: +/- zoom · HJKL pan · 0 fit · arrows next image\n  Pin an image from its action menu to compare with another.\n\nJobs\n  Enter resumes, explicitly retries, or cancels a job. Ctrl-C pauses queued work.\n  Exit waits for active requests or interrupts locally. Remote work may continue.\n  Interrupted submissions without a receipt need explicit retry confirmation.\n\nNavigation\n  Tab next screen · Ctrl-P action palette · F1 help · Esc back · Ctrl-Q quit\n  Path prompts: Tab complete; click a suggestion, Enter accepts the path.\n\nImages and metadata live together under ${library.root}.\nThe index can be rebuilt from Settings. Export copies originals and metadata.\nUse imagegen --help for CLI commands and batch file options.`}</text>
             </scrollbox>
           </Show>
         </box>
@@ -1411,6 +1600,34 @@ export function createApp(library: Library, engine: Engine) {
               Enter save · Esc cancel{dialog()?.path ? " · Tab complete" : ""}
             </text>
           </box>
+        </Show>
+        <Show when={overlayPreview()}>
+          <box
+            position="absolute"
+            top={3}
+            left={2}
+            width="90%"
+            height="80%"
+            border
+            backgroundColor={C.panel}
+            flexDirection="column"
+          >
+            <text>Overlay preview · Esc closes</text>
+            <image
+              source={overlayPreview()!}
+              protocol="auto"
+              fit="fit"
+              width="100%"
+              flexGrow={1}
+            />
+          </box>
+        </Show>
+        <Show when={full() && clip()}>
+          <text
+            position="absolute"
+            bottom={3}
+            left={2}
+          >{`GIF ${frame() + 1}/${clip()!.frames.length} · ${playing() ? "Playing" : "Paused"} · Space play/pause · [ ] frame`}</text>
         </Show>
       </box>
     );

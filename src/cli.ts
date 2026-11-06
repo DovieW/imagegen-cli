@@ -9,10 +9,10 @@ import {
   configRoot,
   stateRoot,
 } from "./config";
-import { MODELS, modelFor } from "./models";
+import { MODELS, modelFor, DEFAULT_MODEL, describeModel } from "./models";
 import { Engine } from "./jobs";
-import { expandBatch, Library } from "./storage";
-import { openExternal } from "./viewer";
+import { expandBatch, Library, validateInputs } from "./storage";
+import { openExternal, preview, animation, rasterize } from "./viewer";
 import {
   callEngine,
   dispatch,
@@ -52,9 +52,10 @@ imagegen config [--concurrency N] [--provider-limit PROVIDER=N] --json
 imagegen doctor --json
 imagegen auth PROVIDER [--key-file PATH | --remove | --endpoint URL] --json
 imagegen view IMAGE_ID [--external]
+imagegen rasterize IMAGE_ID [--frame N] --json   Explicit PNG reference conversion
 
 --json: one versioned result/error object on stdout; diagnostics on stderr.
---jsonl: job-change events followed by one result event. Do not combine formats.
+--jsonl: preview and job-change events followed by one result event. Do not combine formats.
 Generation waits by default and returns batch/job/image IDs plus absolute output paths.
 --no-wait requires an already running TUI/CLI engine. Jobs never run as a daemon.
 Separate CLI processes automatically share a running engine for the same image root.
@@ -174,6 +175,8 @@ function publicJob(job: Job, dir: string, batch: { id: string; name: string }) {
     batchName: batch.name,
     directory: dir,
     remoteRequestId: remote?.id,
+    mask: job.mask ? join(dir, job.mask) : undefined,
+    markup: job.markup ? join(dir, job.markup) : undefined,
     references: job.references.map((p) => join(dir, p)),
     outputs: job.outputs.map((o, index) => ({
       ...o,
@@ -324,7 +327,7 @@ export async function runCli(
   if (command === "models") {
     if (pos.length > 1)
       throw new CliError("INVALID_ARGUMENTS", "models accepts at most one ID");
-    emit(pos[0] ? modelFor(pos[0]) : MODELS);
+    emit(pos[0] ? describeModel(modelFor(pos[0])) : MODELS.map(describeModel));
     return;
   }
   if (command === "jobs") {
@@ -345,6 +348,16 @@ export async function runCli(
     emit(pos.length ? jobs[0] : pagination(jobs));
     return;
   }
+  if (command === "rasterize") {
+    needs(1);
+    const source = findImage(library, pos[0]!);
+    emit({
+      path: rasterize(source, integer(get("frame"), "frame", 0), library.state),
+      mime: "image/png",
+      sourceImageId: source.id,
+    });
+    return;
+  }
   if (command === "image") {
     needs(1);
     emit(findImage(library, pos[0]!));
@@ -354,11 +367,22 @@ export async function runCli(
     needs(0);
     if (get("sort") && !["newest", "oldest", "model"].includes(get("sort")!))
       throw new CliError("INVALID_SORT", "Choose newest, oldest, or model");
+    if (
+      get("format") &&
+      !["png", "jpeg", "webp", "gif", "svg"].includes(get("format")!)
+    )
+      throw new CliError(
+        "INVALID_FORMAT",
+        "Choose png, jpeg, webp, gif, or svg",
+      );
     const rebuilt = get("rebuild") ? library.rebuild() : undefined;
     const items = library
       .images(get("query"), !!get("favorite"), get("sort"))
       .filter(
         (i) =>
+          (!get("format") ||
+            i.mime ===
+              `image/${get("format") === "svg" ? "svg+xml" : get("format")}`) &&
           (!get("model") || i.model === get("model")) &&
           (!get("provider") || i.provider === get("provider")) &&
           (!get("batch") || i.batchId.startsWith(get("batch")!)) &&
@@ -457,20 +481,61 @@ export async function runCli(
         "Inline viewing requires a terminal; use image IMAGE_ID --json to obtain its path",
       );
     const r = await createCliRenderer({ exitOnCtrlC: false });
-    r.root.add(
-      new ImageRenderable(r, {
-        id: "image",
-        source: image.path,
-        width: "100%",
-        height: "100%",
-        fit: "fit",
-        protocol: "auto",
-      }),
-    );
+    let frame = 0,
+      playing = true,
+      loops = 0,
+      timer: ReturnType<typeof setTimeout> | undefined;
+    const clip = image.mime === "image/gif" ? animation(image) : undefined;
+    const picture = new ImageRenderable(r, {
+      id: "image",
+      source: preview(image, 1200, 1, 0.5, 0.5, library.state),
+      width: "100%",
+      height: "100%",
+      fit: "fit",
+      protocol: "auto",
+    });
+    r.root.add(picture);
+    const update = () => {
+      picture.source = preview(image, 1200, 1, 0.5, 0.5, library.state, frame);
+    };
+    const tick = () => {
+      clearTimeout(timer);
+      if (clip && playing)
+        timer = setTimeout(() => {
+          if (frame + 1 >= clip.frames.length) {
+            loops++;
+            if (clip.loops && loops >= clip.loops) {
+              playing = false;
+              return;
+            }
+          }
+          frame = (frame + 1) % clip.frames.length;
+          update();
+          tick();
+        }, clip.frames[frame]!.delay);
+    };
+    tick();
     r.keyInput.on("keypress", (key) => {
       if (["escape", "q", "return"].includes(key.name)) r.destroy();
+      if (clip && key.name === "space") {
+        playing = !playing;
+        tick();
+      }
+      if (clip && ["[", "]"].includes(key.sequence)) {
+        playing = false;
+        frame =
+          (frame + (key.sequence === "[" ? -1 : 1) + clip.frames.length) %
+          clip.frames.length;
+        update();
+        tick();
+      }
     });
-    await new Promise<void>((resolve) => r.on("destroy", resolve));
+    await new Promise<void>((resolve) =>
+      r.on("destroy", () => {
+        clearTimeout(timer);
+        resolve();
+      }),
+    );
     return;
   }
   let request: ControlRequest | undefined;
@@ -582,8 +647,10 @@ export async function runCli(
         rows: [
           {
             prompt,
-            model: get("model") || sources[0]?.model || "gpt-image-2.5-flare",
+            model: get("model") || sources[0]?.model || DEFAULT_MODEL,
             provider: get("provider") as Provider | undefined,
+            mask: get("mask") ? expand(get("mask")!) : undefined,
+            markup: get("markup") ? expand(get("markup")!) : undefined,
             count: integer(get("count"), "count", 1, 1),
             references: [
               ...sources.map((i) => i.path),
@@ -610,11 +677,16 @@ export async function runCli(
         throw new CliError("INVALID_BATCH", "Batch requires a rows array");
       const absolute = (p: string) =>
         p.startsWith("~") || p.startsWith("/") ? expand(p) : join(base, p);
-      for (const r of spec.rows) r.references = r.references?.map(absolute);
+      for (const r of spec.rows) {
+        r.references = r.references?.map(absolute);
+        if (r.mask) r.mask = absolute(r.mask);
+        if (r.markup) r.markup = absolute(r.markup);
+      }
       if (spec.matrix?.references)
         spec.matrix.references = spec.matrix.references.map(absolute);
     }
     const rows = expandBatch(spec);
+    validateInputs(rows);
     if (get("dry-run")) {
       emit({
         dryRun: true,
@@ -704,11 +776,22 @@ export async function runCli(
     const deadline = timeout ? Date.now() + timeout * 1000 : Infinity;
     deadlineForCleanup = deadline;
     const seen = new Map<string, string>();
+    const previews = new Map<string, string>();
     let lastOwnerCheck = 0;
     while (true) {
       const result = summarize(library, ids);
       if (jsonl)
         for (const job of result.jobs) {
+          if (job.preview && previews.get(job.id) !== job.preview.updatedAt) {
+            previews.set(job.id, job.preview.updatedAt);
+            console.log(
+              JSON.stringify({
+                schemaVersion: 1,
+                event: "preview",
+                data: { jobId: job.id, ...job.preview },
+              }),
+            );
+          }
           const value = JSON.stringify(job);
           if (seen.get(job.id) !== value) {
             seen.set(job.id, value);

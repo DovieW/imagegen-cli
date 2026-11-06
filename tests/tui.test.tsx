@@ -99,7 +99,7 @@ test("gallery supports full-screen comparison, zoom, and masked credential entry
     s.mockInput.pressEnter();
     await s.flush();
     expect(s.captureCharFrame()).toContain("Pinned");
-    s.mockInput.pressKey("right");
+    s.mockInput.pressArrow("right");
     await s.flush();
     s.mockInput.pressKey("=");
     await s.flush();
@@ -123,6 +123,60 @@ test("gallery supports full-screen comparison, zoom, and masked credential entry
     s.renderer.destroy();
     await e.close();
     process.env.IMAGEGEN_CONFIG_DIR = oldConfig;
+    f.close();
+  }
+});
+
+test("GIF keyboard playback, frame stepping, explicit frame references and format filtering", async () => {
+  const { gifFixture } = await import("./media-fixtures");
+  const f = fixture(),
+    e = new Engine(f.library, adapter(), defaults());
+  const old = process.env.IMAGEGEN_CONFIG_DIR;
+  process.env.IMAGEGEN_CONFIG_DIR = join(f.root, "config");
+  const { dir, batch } = f.library.create({
+    schemaVersion: 1,
+    name: "Animation",
+    rows: [{ prompt: "loop", model: "gpt-image-2.6-flare" }],
+  });
+  f.library.saveOutput(dir, batch, batch.jobs[0]!, gifFixture(), 0);
+  const App = createApp(f.library, e);
+  const s = await testRender(() => <App />, {
+    width: 120,
+    height: 40,
+    exitOnCtrlC: false,
+  });
+  try {
+    await s.flush();
+    s.mockInput.pressKey("v");
+    await s.flush();
+    expect(s.captureCharFrame()).toContain("GIF");
+    s.mockInput.pressKey(" ");
+    await s.flush();
+    expect(s.captureCharFrame()).toContain("Paused");
+    s.mockInput.pressKey("]");
+    await s.flush();
+    expect(s.captureCharFrame()).toContain("2/4");
+    s.mockInput.pressEnter();
+    await s.flush();
+    await s.mockInput.typeText("Use current frame");
+    s.mockInput.pressEnter();
+    await s.flush();
+    expect(s.captureCharFrame()).toContain("Reference images");
+    s.mockInput.pressEscape();
+    await Bun.sleep(40);
+    await s.flush();
+    s.mockInput.pressKey("p", { ctrl: true });
+    await s.flush();
+    await s.mockInput.typeText("Library");
+    s.mockInput.pressEnter();
+    await s.flush();
+    s.mockInput.pressKey("t");
+    await s.flush();
+    expect(s.captureCharFrame()).toContain("All formats");
+  } finally {
+    s.renderer.destroy();
+    await e.close();
+    process.env.IMAGEGEN_CONFIG_DIR = old;
     f.close();
   }
 });

@@ -16,6 +16,7 @@ jobs:
       - run: npm ci
       - run: node node_modules/bun/install.js
       - run: npm run check && npm test && npm run build
+      - run: npm run smoke
       - run: cp dist/imagegen dist/imagegen-linux-x64
       - run: cd dist && sha256sum imagegen-linux-x64 > SHA256SUMS
       - run: gh release create "$GITHUB_REF_NAME" dist/imagegen-linux-x64 dist/SHA256SUMS --generate-notes

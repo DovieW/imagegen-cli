@@ -1,4 +1,4 @@
-export const CLI_VERSION = "0.2.1";
+export const CLI_VERSION = "0.3.0";
 export const COMMANDS: Record<
   string,
   {
@@ -16,6 +16,8 @@ export const COMMANDS: Record<
       provider: "value",
       count: "value",
       ref: "repeat",
+      mask: "value",
+      markup: "value",
       from: "repeat",
       "parent-id": "repeat",
       settings: "value",
@@ -78,6 +80,7 @@ export const COMMANDS: Record<
     description: "Search/filter images with stable IDs and absolute paths",
     flags: {
       query: "value",
+      format: "value",
       favorite: "boolean",
       rebuild: "boolean",
       model: "value",
@@ -88,6 +91,12 @@ export const COMMANDS: Record<
       limit: "value",
       offset: "value",
     },
+  },
+  rasterize: {
+    description:
+      "Convert an original or GIF frame to a cached PNG reference; frame indices start at zero",
+    positionals: "IMAGE_ID",
+    flags: { frame: "value" },
   },
   image: {
     description: "Inspect image metadata and parent lineage",
@@ -185,12 +194,14 @@ const row = {
     provider: {
       enum: ["openai", "google", "microsoft", "meta", "bfl", "fal", "xai"],
     },
+    mask: { type: "string" },
+    markup: { type: "string" },
     references: { type: "array", items: { type: "string" } },
     parentIds: { type: "array", items: { type: "string" } },
     count: { type: "integer", minimum: 1, maximum: 1000 },
     settings: {
       type: "object",
-      additionalProperties: { type: ["string", "number", "boolean"] },
+      additionalProperties: { type: ["string", "number", "boolean", "object"] },
     },
   },
   additionalProperties: false,
